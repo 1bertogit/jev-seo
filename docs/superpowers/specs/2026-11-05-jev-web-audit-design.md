@@ -103,6 +103,25 @@ publicar depende de confirmar capacidade de execução contínua e volume persis
 - Chave Jev ausente é erro de configuração do serviço, não convite ao visitante
   para colar uma chave. Não trocar silenciosamente para outro provedor.
 
+### Condições da versão pública
+
+- Começar com renderização JavaScript desativada; páginas que dependam dela
+  precisam aparecer como cobertura limitada, não como análise completa.
+- A publicação exige bloqueio real de saída para redes não públicas ou proxy
+  validante. Validar DNS antes de uma chamada `requests` não elimina rebinding.
+- Impor limites de bytes descomprimidos, requisições e recursos do processo;
+  não permitir que o subprocesso leia outras tarefas, banco ou arquivos de chaves.
+- Neutralizar fórmulas vindas das páginas no Excel, escapar conteúdo no Markdown
+  e impedir acessos externos ou a arquivos arbitrários pelo renderizador PDF.
+- Reservar US$ 0,05 por tarefa aceita, sem devolver a reserva no MVP: no máximo
+  20 tarefas por dia. Retries da mesma criação precisam ser idempotentes.
+- Usar chave Jev dedicada com limite no provedor: o ledger local é estimativo
+  e não representa garantia absoluta de cobrança externa.
+- Tentar cada formato independentemente. A nota e os arquivos devem refletir
+  falhas individuais, páginas não avaliadas e truncamento por limite de páginas.
+- Os relatórios automáticos devem descrever sua geração real; não atribuir sua
+  redação a Claude ou a outro modelo que não participou da análise.
+
 ## Verificação e critério de entrega
 
 - Testes sem gasto para criação, fila, limites, orçamento, autorização, expiração,
