@@ -290,6 +290,10 @@ def view_model(d: dict, folder: Path) -> dict:
             site_cards.append(card)
 
     robots = site["robots"]
+    from jevseo.checks import indexable
+
+    expected_jev = [p for p in pages if indexable(p) or p["url"] == site["final_url"]]
+    not_judged = sorted({u for u, a in jp.items() if a is None} | {p["url"] for p in expected_jev if p["url"] not in jp} | set(d["jev"].get("not_judged") or []))
     return {
         "d": d,
         "domain": domain,
@@ -309,7 +313,7 @@ def view_model(d: dict, folder: Path) -> dict:
         "site_cards": site_cards,
         "dfs": dfs_vm,
         "jev_available": any(jp.values()),
-        "not_judged": [u for u, a in jp.items() if a is None],
+        "not_judged": not_judged,
         "p1_count": sum(1 for a in acts if a["priority"] == "P1"),
         "invest_pages": sorted(
             [{"short": short(u, domain), "importance": a["importance"]["value"], "quality": mean([a[k]["value"] for k in ("helpfulness", "specificity", "trust") if k in a]), "action": a["action"]["value"]}
@@ -320,6 +324,7 @@ def view_model(d: dict, folder: Path) -> dict:
         "questions": d["jev"].get("questions") or {},
         "perf_runs": runs,
         "perf_errors": [r for r in perf.get("runs", []) if "error" in r],
+        "js_rendering_unavailable": bool(s.get("completeness", {}).get("js_rendering_unavailable")),
         "field": field,
         "home_mobile": home_mobile,
         "ai_bots": robots["ai_bots"],
@@ -338,24 +343,34 @@ def build(folder: Path, formats: list[str], log=print) -> dict:
     log("building charts")
     vm = view_model(data, folder)
     written = {}
+    errors = []
+    def attempt(fmt, writer, output, message):
+        try:
+            log(message)
+            written[fmt] = writer(vm, output)
+        except Exception as err:  # noqa: BLE001
+            errors.append((fmt, err))
+            log(f"{fmt} failed: {type(err).__name__}: {err}")
+
     if "pdf" in formats:
         from jevseo.report.pdf import write_pdf
 
-        log("rendering PDF")
-        written["pdf"] = write_pdf(vm, folder / "report.pdf")
+        attempt("pdf", write_pdf, folder / "report.pdf", "rendering PDF")
     if "xlsx" in formats:
         from jevseo.report.xlsx import write_xlsx
 
-        log("writing workbook")
-        written["xlsx"] = write_xlsx(vm, folder / "report.xlsx")
+        attempt("xlsx", write_xlsx, folder / "report.xlsx", "writing workbook")
     if "md" in formats:
         from jevseo.report.md import write_md
 
-        written["md"] = write_md(vm, folder / "report.md")
+        attempt("md", write_md, folder / "report.md", "writing Markdown")
     for k, v in written.items():
         log(f"{k}: {v}")
     for issue in vm["narrative"].get("effort_mismatches") or []:
         log(f"WARNING narrative effort mismatch: {issue}")
     if vm["narrative"].get("unverified_numbers"):
         log("WARNING narrative.json contains numbers not found in the audit: " + ", ".join(vm["narrative"]["unverified_numbers"]) + ". Check them against digest.md and re-render.")
+    if errors:
+        detail = "; ".join(f"{fmt}: {type(err).__name__}: {err}" for fmt, err in errors)
+        raise RuntimeError("report generation failed: " + detail) from errors[0][1]
     return written

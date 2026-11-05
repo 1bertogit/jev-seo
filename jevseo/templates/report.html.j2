@@ -14,7 +14,7 @@
     {% if a.heuristic %}<span class="chip sev-info">heuristic</span>{% endif %}
   </div>
   <div class="ev">{{ a.count }} affected · {{ a.evidence }}</div>
-  <div class="fix"><b>Fix:</b> {{ a.fix }} <a href="{{ a.source }}">Source</a></div>
+  <div class="fix"><b>Fix:</b> {{ a.fix }} <a href="{{ a.source if a.source.startswith('http://') or a.source.startswith('https://') else '#' }}">Source</a></div>
   <div class="urls url">{{ a.short_urls | join('  ·  ') }}{% if a.count > 6 %}  ·  +{{ a.count - 6 }} more{% endif %}</div>
 </div>
 {%- endmacro -%}
@@ -89,8 +89,8 @@
 <!-- HOW IT WORKS -->
 <section class="section">
   <div class="kicker">How this audit was made</div>
-  <h2>A source finds, code decides, Jev judges, Claude writes</h2>
-  <p class="lede">Each stage does only what it is good at. Anything a count, a status code or a string match can decide is decided by code. Jev, TypeSafe's System One model, answers narrow typed questions about meaning, with probabilities. Nothing is invented to fill a gap: missing data is shown as missing.</p>
+  <h2>A source finds, code decides, Jev judges, {% if narrative.automatic %}code writes an evidence-only summary{% else %}the supplied narrative explains the evidence{% endif %}</h2>
+  <p class="lede">Each stage does only what it is good at. Anything a count, a status code or a string match can decide is decided by code. Jev, TypeSafe's System One model, answers narrow typed questions about meaning, with probabilities. Nothing is invented to fill a gap: missing data is shown as missing.{% if narrative.automatic %} No supplied narrative was available, so the summary is generated automatically from the audit evidence.{% else %} The supplied narrative is checked against action IDs and audit numbers before rendering.{% endif %}</p>
   <div class="pipeline">
     <div class="step"><div class="n">1</div><h4>Crawl</h4><div class="what">Live fetch from the homepage: robots.txt, sitemaps, internal links, JavaScript rendering when needed.</div><div class="stat">{{ n_fetched }}<span>URLs · {{ site.requests }} requests</span></div></div>
     <div class="arrow">›</div>
@@ -291,8 +291,8 @@
     <tr><td>XML sitemap</td><td>{{ site.sitemaps.total_urls }} URLs in {{ site.sitemaps.files | length }} file(s)</td></tr>
     <tr><td>HTTPS</td><td>{{ 'yes' if site.https else 'no' }} · HTTP redirects to HTTPS: {{ 'yes' if site.probes.http_to_https else 'no' }}</td></tr>
     <tr><td>Missing page status</td><td>{{ site.probes.not_found_status }}{% if site.probes.not_found_status == 404 %} <span class="ok">correct</span>{% endif %}</td></tr>
-    <tr><td>Rendering</td><td>{{ site.render.mode }}; homepage needed JavaScript rendering: {{ 'yes' if site.render.homepage_rendered else 'no' }}</td></tr>
-    <tr><td>Crawl limits</td><td>{{ site.limits.max_pages }} pages, depth {{ site.limits.max_depth }}{% if site.limits.hit_page_cap %} · <b>page cap reached: larger sites were sampled</b>{% endif %}</td></tr>
+    <tr><td>Rendering</td><td>{{ site.render.mode }}; homepage rendered with JavaScript: {{ 'yes' if site.render.homepage_rendered else 'no' }}{% if js_rendering_unavailable %} · <b>required JavaScript rendering unavailable</b>{% endif %}</td></tr>
+    <tr><td>Crawl limits</td><td>{{ site.limits.max_pages }} pages, depth {{ site.limits.max_depth }}{% if site.limits.hit_page_cap %} · <b>page cap reached: larger sites were sampled</b>{% endif %}{% if site.limits.hit_time_budget %} · <b>time budget reached: crawl may be incomplete</b>{% endif %}</td></tr>
   </table>
   {% elif c == 'onpage' %}
   <div class="grid3">
@@ -308,7 +308,7 @@
   </div>
   {% elif c == 'performance' %}
   {{ chart('lighthouse', 'Lighthouse lab scores for the homepage (one synthetic load each)') }}
-  {% if field %}<h3>Core Web Vitals, real Chrome users (75th percentile{% if not home_mobile.field_url %}, whole origin{% endif %})</h3>{{ chart('cwv') }}{% else %}<p class="muted">No Chrome UX Report field data for this site: it has too little traffic to be measured.</p>{% endif %}
+  {% if field %}<h3>Core Web Vitals, real Chrome users (75th percentile{% if not home_mobile.field_url %}, whole origin{% endif %})</h3>{{ chart('cwv') }}{% elif perf_errors or not perf_runs %}<p class="muted">No Chrome UX Report field data is shown because PageSpeed Insights did not return all requested runs; this is not evidence of low traffic.</p>{% else %}<p class="muted">Chrome UX Report field data is unavailable for this site; no field measurement was returned.</p>{% endif %}
   {% if home_mobile and home_mobile.opportunities %}<h3>Largest lab opportunities (mobile homepage)</h3><table>{% for o in home_mobile.opportunities %}<tr><td>{{ o.title }}</td><td class="num">{{ o.savings_ms }} ms</td></tr>{% endfor %}</table>{% endif %}
   {% endif %}
   <h3>Actions</h3>
@@ -339,9 +339,9 @@
   <h3>Limits</h3>
   <ul>
     {% if not_judged %}<li>{{ not_judged | length }} pages were not judged by Jev (request failed or budget cap reached); they carry no Jev findings, which is not the same as passing.</li>{% endif %}
-    <li>The crawl covered {{ n_fetched }} URLs{% if site.limits.hit_page_cap %}, stopping at the page cap, so site-wide counts describe a sample{% endif %}. Orphan and depth findings only see links on crawled pages.</li>
+    <li>The crawl covered {{ n_fetched }} URLs{% if site.limits.hit_page_cap %}, stopping at the page cap, so site-wide counts describe a sample{% endif %}{% if site.limits.hit_time_budget %}, and the time budget was reached{% endif %}. Orphan and depth findings only see links on crawled pages.</li>
     {% if dfs %}<li>Rankings, keywords and backlinks come from DataForSEO's databases, not from Search Console or analytics. Nothing here measures actual visits or revenue.</li>{% else %}<li>No Search Console, analytics, backlink or keyword data was used (run with --full for DataForSEO). Nothing here measures rankings, traffic or revenue.</li>{% endif %}
-    <li>PageSpeed lab scores vary between runs. Field data exists only for sites with enough Chrome traffic.</li>
+    <li>PageSpeed lab scores vary between runs. Field data exists only for sites with enough Chrome traffic; a failed PageSpeed run is not evidence of low traffic.</li>
     <li>Rules marked heuristic are editorial conventions, not search engine requirements.</li>
   </ul>
   <h3>Sources</h3>

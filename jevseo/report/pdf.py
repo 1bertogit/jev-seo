@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -19,6 +20,23 @@ FACES = [("Inter", 400, "Inter-Regular.otf"), ("Inter", 500, "Inter-Medium.otf")
 
 def font_css() -> str:
     return "".join(f"@font-face {{ font-family: '{fam}'; font-weight: {w}; src: url('{(FONTS / f).as_uri()}'); }}\n" for fam, w, f in FACES if (FONTS / f).is_file())
+
+
+def allowed_url_fetcher(url: str, allowed_paths: set[Path]) -> dict:
+    """Fetch only exact local report assets; reject remote and arbitrary file URLs."""
+    parsed = urlparse(url)
+    if parsed.scheme != "file":
+        raise ValueError(f"report resource blocked: {url}")
+    target = Path(unquote(parsed.path)).resolve()
+    if target not in allowed_paths:
+        raise ValueError(f"report file blocked: {target}")
+    try:
+        from weasyprint import default_url_fetcher
+    except ImportError:  # WeasyPrint 70 exposes the same fetcher as URLFetcher.
+        from weasyprint import URLFetcher
+
+        return URLFetcher(allowed_protocols={"file"})(url)
+    return default_url_fetcher(url)
 
 
 def context(vm: dict) -> dict:
@@ -46,5 +64,7 @@ def write_pdf(vm: dict, path: Path) -> Path:
 
     html = render_html(vm)
     path.with_suffix(".html").write_text(html)
-    HTML(string=html, base_url=str(path.parent)).write_pdf(path)
+    allowed = {(FONTS / filename).resolve() for _, _, filename in FACES if (FONTS / filename).is_file()}
+    allowed.update(p.resolve() for p in (vm.get("charts").png.values() if vm.get("charts") else []))
+    HTML(string=html, base_url=str(path.parent), url_fetcher=lambda url: allowed_url_fetcher(url, allowed)).write_pdf(path)
     return path

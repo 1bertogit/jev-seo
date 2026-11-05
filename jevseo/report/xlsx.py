@@ -30,6 +30,13 @@ WRAP = Alignment(wrap_text=True, vertical="top")
 THIN = Border(bottom=Side(style="thin", color=LINE))
 
 
+def safe_cell_value(value):
+    """Keep page-controlled strings from becoming spreadsheet formulas."""
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
 def cf(ws, rng: str, rule) -> None:
     """Conditional formatting that skips empty ranges (for example "G2:G1" when a sheet has no rows)."""
     m = re.match(r"([A-Z]+)(\d+):([A-Z]+)(\d+)$", rng)
@@ -46,7 +53,7 @@ def table(ws, headers: list[str], rows: list[list], widths: list[int], start_row
         c.alignment = Alignment(vertical="center", wrap_text=True)
     for i, row in enumerate(rows, start_row + 1):
         for j, v in enumerate(row, 1):
-            c = ws.cell(i, j, v)
+            c = ws.cell(i, j, safe_cell_value(v))
             c.font = BODY
             c.alignment = WRAP
             c.border = THIN
@@ -73,9 +80,9 @@ def write_xlsx(vm: dict, path: Path) -> Path:
     ws = wb.active
     ws.title = "Summary"
     ws.sheet_view.showGridLines = False
-    ws["A1"] = f"Jev SEO audit: {vm['domain']}"
+    ws["A1"] = safe_cell_value(f"Jev SEO audit: {vm['domain']}")
     ws["A1"].font = Font(name="Inter Display", bold=True, size=20)
-    ws["A2"] = f"Audited {d['run']['finished_at']} · {vm['n_fetched']} URLs crawled · {vm['n_pages']} HTML pages · Jev {vm['ledger'].get('model_returned') or 'not used'}"
+    ws["A2"] = safe_cell_value(f"Audited {d['run']['finished_at']} · {vm['n_fetched']} URLs crawled · {vm['n_pages']} HTML pages · Jev {vm['ledger'].get('model_returned') or 'not used'}")
     ws["A2"].font = Font(name="Inter", size=10, color="52514E")
     ws["A4"], ws["B4"] = "Overall score", s["overall"]
     ws["A5"], ws["B5"] = "Grade", s["grade"] + (" (partial audit)" if s.get("partial") else "")
@@ -84,6 +91,11 @@ def write_xlsx(vm: dict, path: Path) -> Path:
     ws["A7"], ws["B7"] = "DataForSEO cost (USD)", (vm["dfs"]["ledger"]["cost_usd"] if vm.get("dfs") else "not used")
     if vm.get("dfs"):
         ws["B7"].number_format = "$0.0000"
+    if s.get("partial"):
+        ws["A8"], ws["B8"] = "Partial audit", safe_cell_value("; ".join(s["partial"]))
+        ws["A8"].font = Font(name="Inter", bold=True)
+        ws["B8"].font = BODY
+        ws["B8"].alignment = WRAP
     for r in (4, 5, 6, 7):
         ws[f"A{r}"].font = Font(name="Inter", bold=True)
         ws[f"B{r}"].font = Font(name="Inter Display", bold=True, size=14, color="A83A8C")
@@ -242,6 +254,7 @@ def write_xlsx(vm: dict, path: Path) -> Path:
         ["Render mode", site["render"]["mode"]],
         ["Requests made", site["requests"]],
         ["Page cap reached", "yes" if site["limits"]["hit_page_cap"] else "no"],
+        ["Partial audit", "; ".join(s.get("partial") or []) or "no"],
     ] + [[f"Search bot: {b}", "allowed" if ok else "blocked"] for b, ok in site["robots"]["search_bots"].items()] + [[f"AI bot: {b}", "allowed" if ok else "blocked"] for b, ok in site["robots"]["ai_bots"].items()]
     table(wt, ["Check", "Value"], facts, [34, 90])
 
@@ -319,7 +332,7 @@ def write_xlsx(vm: dict, path: Path) -> Path:
     # ---------------- Method
     wm = wb.create_sheet("Method")
     notes = [
-        ["Pipeline", "Crawl (code) -> rules (code) -> Jev typed judgments -> PageSpeed Insights -> scoring and ranking (code) -> narrative (lead agent)."],
+        ["Pipeline", "Crawl (code) -> rules (code) -> Jev typed judgments -> PageSpeed Insights -> scoring and ranking (code) -> " + ("automatic evidence-only summary." if vm["narrative"].get("automatic") else "supplied narrative.")],
         ["Area score", "100 minus, per finding, severity amount (critical 25, high 12, medium 6, low 2) x (0.5 + 0.5 x share of pages affected). Content and AI readiness blend 70% Jev judgment and 30% rules; performance blends 50% Lighthouse mobile and 50% crawl observations."],
         ["Overall", "Weighted mean of scored areas; unscored areas excluded, never zero. Blocked site capped at 20; no reliable HTTPS capped at 60."],
         ["Impact", "Severity weight (10/6/3/1) x (0.6 + 0.4 x reach) x (0.6 + 0.8 x max Jev importance of affected pages), scaled to 100."],
@@ -327,6 +340,7 @@ def write_xlsx(vm: dict, path: Path) -> Path:
         ["Jev ledger", str(vm["ledger"])],
         ["DataForSEO", f"{vm['dfs']['ledger']['requests']} requests, ${vm['dfs']['ledger']['cost_usd']:.4f} as reported per call; volumes, difficulty and ETV are DataForSEO estimates" if vm.get("dfs") else "Not used (run with --full)"],
         ["Status authority", "The Actions sheet Status column is the only editable status. Summary counts update from it. PDF and Markdown are dated snapshots."],
+        ["Completeness", "; ".join(s.get("partial") or []) or "Full audit"],
         ["Limits", "No Search Console, analytics, backlink or keyword volume data. Scores are an internal rubric, not ranking or traffic predictions. Jev answers are model judgments, not measurements."],
     ]
     table(wm, ["Topic", "Detail"], notes, [20, 120])

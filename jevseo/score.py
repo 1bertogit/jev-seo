@@ -8,7 +8,7 @@ from __future__ import annotations
 from statistics import mean
 from urllib.parse import urlparse
 
-from jevseo.checks import CATEGORIES, SEVERITY_WEIGHT, SRC, html_pages
+from jevseo.checks import CATEGORIES, SEVERITY_WEIGHT, SRC, html_pages, indexable
 
 DEDUCT = {"critical": 25, "high": 12, "medium": 6, "low": 2, "info": 0}
 CATEGORY_WEIGHT = {"crawl": 20, "onpage": 15, "content": 20, "links": 10, "structured": 8, "ai": 12, "performance": 10, "security": 5, "visibility": 15}
@@ -249,6 +249,15 @@ def score(crawl: dict, findings: list[dict], judged: dict, perf: dict | None, df
     pages = html_pages(crawl)
     n = len(pages)
     jp = judged.get("pages") or {}
+    expected_jev = [p for p in pages if indexable(p) or p["url"] == crawl["final_url"]]
+    not_judged = {p["url"] for p in expected_jev if p["url"] not in jp or jp[p["url"]] is None}
+    not_judged.update(url for url, ans in jp.items() if ans is None)
+    not_judged.update(judged.get("not_judged") or [])
+    perf_errors = [r for r in (perf or {}).get("runs", []) if "error" in r]
+    js_unavailable = [
+        p for p in crawl.get("pages", [])
+        if p.get("kind") == "page" and (p.get("raw_word_count") or 0) < 60 and (p.get("script_count") or 0) >= 3 and not p.get("rendered")
+    ]
     cats = {}
     notes = {}
     for cat in CATEGORIES:
@@ -311,8 +320,22 @@ def score(crawl: dict, findings: list[dict], judged: dict, perf: dict | None, df
         caps.append("Capped at 60: the site is not reliably served over HTTPS")
     overall = round(overall)
     # A score built without Jev or PageSpeed leaves whole areas unassessed; say so wherever it appears.
-    partial = [reason for missing, reason in ((not any(jp.values()), "Jev judgments unavailable, so content quality was not assessed"),
-                                              (not runs, "PageSpeed Insights unavailable, so performance used crawl timings only")) if missing]
+    partial = []
+    if not_judged:
+        partial.append(f"{len(not_judged)} pages were not judged by Jev (failed, skipped, or outside the judgment cap)")
+    if not any(jp.values()):
+        partial.append("Jev judgments unavailable, so content quality was not assessed")
+    for run in perf_errors:
+        partial.append(f"PageSpeed Insights failed for {run.get('strategy', 'unknown')} run on {run.get('url', 'the requested page')}: {run['error']}")
+    if not runs:
+        partial.append("PageSpeed Insights unavailable, so performance used crawl timings only")
+    limits = crawl.get("limits") or {}
+    if limits.get("hit_page_cap"):
+        partial.append("Crawl page cap reached, so crawl measurements describe a sample")
+    if limits.get("hit_time_budget"):
+        partial.append("Crawl time budget reached, so crawl measurements may be incomplete")
+    if js_unavailable:
+        partial.append(f"Required JavaScript rendering unavailable for {len(js_unavailable)} pages")
     return {
         "partial": partial,
         "overall": overall,
@@ -322,7 +345,7 @@ def score(crawl: dict, findings: list[dict], judged: dict, perf: dict | None, df
         "weights": CATEGORY_WEIGHT,
         "notes": notes,
         "caps": caps,
-        "completeness": {"categories_scored": len(available), "categories_total": len(cats), "jev": any(jp.values()), "jev_pages_not_judged": sum(1 for a in jp.values() if a is None), "pagespeed": bool(runs), "dataforseo": bool(dfs and dfs.get("available"))},
+        "completeness": {"categories_scored": len(available), "categories_total": len(cats), "jev": any(jp.values()), "jev_pages_not_judged": len(not_judged), "pagespeed": bool(runs), "pagespeed_failures": len(perf_errors), "dataforseo": bool(dfs and dfs.get("available")), "crawl_page_cap": bool(limits.get("hit_page_cap")), "crawl_time_budget": bool(limits.get("hit_time_budget")), "js_rendering_unavailable": bool(js_unavailable)},
     }
 
 

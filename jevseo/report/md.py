@@ -1,16 +1,43 @@
 """Markdown report: readable anywhere, with chart images and Mermaid pies for GitHub and Obsidian."""
 from __future__ import annotations
 
+import base64
 from collections import Counter
+from html import escape
 from pathlib import Path
+from urllib.parse import quote, urlparse
+
+from jevseo.env import hosted_mode
 
 
 def cell(v) -> str:
-    return str("" if v is None else v).replace("|", "\\|").replace("\n", " ")
+    value = escape(str("" if v is None else v), quote=False).replace("\n", " ").replace("\r", " ")
+    for token in ("\\", "`", "!", "[", "]", "(", ")", "|"):
+        value = value.replace(token, "\\" + token)
+    return value
 
 
 def label(v) -> str:
     return cell((v or "").replace("_", " "))
+
+
+def report_link(v) -> str:
+    """Keep only the validated HTTP(S) links supplied by report rules."""
+    url = str(v or "")
+    if any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in url):
+        return "#"
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+    except ValueError:
+        return "#"
+    if parsed.scheme not in ("http", "https") or not host or parsed.username is not None or parsed.password is not None:
+        return "#"
+    return quote(url, safe=":/?#@!$&'*+,;=-._~%")
+
+
+def narrative_text(n: dict, value) -> str:
+    return cell(value) if n.get("automatic") else str(value)
 
 
 WIDTH = {"gauge": 220, "severity": 320, "page_types": 360, "intents": 360, "positions": 380, "referring_domains": 380}
@@ -19,25 +46,28 @@ WIDTH = {"gauge": 220, "severity": 320, "page_types": 360, "intents": 360, "posi
 def img(vm: dict, name: str, alt: str) -> str:
     """HTML image tags so GitHub and Obsidian show charts at a readable size."""
     p = vm["charts"].png.get(name)
-    return f'<img src="charts/{p.name}" alt="{alt}" width="{WIDTH.get(name, 640)}">\n' if p else ""
+    if not p:
+        return ""
+    src = f"data:image/png;base64,{base64.b64encode(p.read_bytes()).decode('ascii')}" if hosted_mode() else f"charts/{p.name}"
+    return f'<img src="{src}" alt="{alt}" width="{WIDTH.get(name, 640)}">\n'
 
 
 def pie(title: str, counts: dict) -> str:
     if not counts:
         return ""
-    body = "\n".join(f'    "{k.replace("_", " ")}" : {v}' for k, v in counts.items() if v)
-    return f"```mermaid\npie showData title {title}\n{body}\n```\n"
+    body = "\n".join('    "' + cell(str(k).replace("_", " ")).replace('"', '\\"') + f'" : {v}' for k, v in counts.items() if v)
+    return f"```mermaid\npie showData title {cell(title)}\n{body}\n```\n"
 
 
 def write_md(vm: dict, path: Path) -> Path:
     d, s, n = vm["d"], vm["scores"], vm["narrative"]
     L = []
     add = L.append
-    add(f"# Jev SEO audit: {vm['domain']}\n")
-    add(f"Audited {d['run']['finished_at']} · {vm['n_fetched']} URLs crawled · {vm['n_pages']} HTML pages · {vm['n_judgments']} Jev judgments · Jev cost ${(vm['ledger'].get('cost_usd') or 0):.4f}\n")
-    add(f"**Overall score: {s['overall']}/100 (grade {s['grade']})**" + (f". {'; '.join(s['caps'])}" if s["caps"] else "") + "\n")
+    add(f"# Jev SEO audit: {cell(vm['domain'])}\n")
+    add(f"Audited {cell(d['run']['finished_at'])} · {vm['n_fetched']} URLs crawled · {vm['n_pages']} HTML pages · {vm['n_judgments']} Jev judgments · Jev cost ${(vm['ledger'].get('cost_usd') or 0):.4f}\n")
+    add(f"**Overall score: {s['overall']}/100 (grade {s['grade']})**" + (f". {cell('; '.join(s['caps']))}" if s["caps"] else "") + "\n")
     if s.get("partial"):
-        add(f"> **Partial audit:** {'; '.join(s['partial'])}. The overall score covers only the areas that were assessed.\n")
+        add(f"> **Partial audit:** {cell('; '.join(s['partial']))}. The overall score covers only the areas that were assessed.\n")
     add(img(vm, "gauge", "Overall score"))
     add("| Area | Score | Weight | How it is scored |\n|---|---:|---:|---|")
     for c, name in s["category_names"].items():
@@ -51,21 +81,21 @@ def write_md(vm: dict, path: Path) -> Path:
     add("**Contents:** " + " · ".join(f"[{h}]({anchor(h)})" for h in toc) + "\n")
     add("## Executive summary\n")
     for para in n["executive_summary"]:
-        add(para + "\n")
+        add(narrative_text(n, para) + "\n")
     add("**What is working**\n")
-    add("\n".join(f"- {x}" for x in n["strengths"]) + "\n")
+    add("\n".join(f"- {narrative_text(n, x)}" for x in n["strengths"]) + "\n")
     add("**What is holding the site back**\n")
-    add("\n".join(f"- {x}" for x in n["risks"]) + "\n")
+    add("\n".join(f"- {narrative_text(n, x)}" for x in n["risks"]) + "\n")
     add("### Plan\n")
     for block in n["plan"]:
-        add(f"**{block['horizon']}**\n")
-        add("\n".join(f"- {x}" for x in block["items"]) + "\n")
+        add(f"**{narrative_text(n, block['horizon'])}**\n")
+        add("\n".join(f"- {narrative_text(n, x)}" for x in block["items"]) + "\n")
     if n.get("closing"):
-        add(n["closing"] + "\n")
-    add(f"_Written by: {n['author']}._\n")
+        add(narrative_text(n, n["closing"]) + "\n")
+    add(f"_Written by: {narrative_text(n, n['author'])}._\n")
 
     add("## How this audit was made\n")
-    add("A source finds, code decides, Jev judges, Claude writes. Code crawls, counts and scores. Jev (TypeSafe's System One model) answers narrow typed questions about meaning, with probabilities. Missing data is shown as missing.\n")
+    add("A source finds, code decides, Jev judges, " + ("code writes an evidence-only summary." if n.get("automatic") else "the supplied narrative explains the evidence.") + " Code crawls, counts and scores. Jev (TypeSafe's System One model) answers narrow typed questions about meaning, with probabilities. Missing data is shown as missing.\n")
     add("```mermaid\nflowchart LR\n  A[Crawl<br/>" + f"{vm['n_fetched']} URLs" + "] --> B[Rules<br/>" + f"{sum(1 for f in d['findings'] if f['origin'] == 'rule')} findings" + "] --> C[Jev judges<br/>" + f"{vm['n_judgments']} judgments" + "] --> D[PageSpeed<br/>" + f"{len(vm['perf_runs'])} runs" + "] --> E[Score and write<br/>" + f"{len(vm['actions'])} actions" + "]\n  style C fill:#d45bb6,color:#fff\n```\n")
 
     add("## Priority actions\n")
@@ -87,19 +117,19 @@ def write_md(vm: dict, path: Path) -> Path:
         add(img(vm, "referring_domains", "Referring domains compared"))
         add("| Keyword | Position | Searches/mo | Ranking page | Jev relevance |\n|---|---:|---:|---|---:|")
         for k in x["ranked"][:20]:
-            add(f"| {cell(k['keyword'])} | {k.get('position')} | {k.get('volume')} | {k['page']} | {'' if k['relevance'] is None else format(k['relevance'], '.2f')} |")
+            add(f"| {cell(k['keyword'])} | {k.get('position')} | {k.get('volume')} | {cell(k['page'])} | {'' if k['relevance'] is None else format(k['relevance'], '.2f')} |")
         add("\n### Keywords worth winning\n")
         add(img(vm, "opportunities", "Keyword opportunities"))
         add("| Keyword | Searches/mo | Difficulty | Intent | Jev relevance | Page to own it |\n|---|---:|---:|---|---:|---|")
         for k in x["opportunities"]:
             rel = "" if k.get("relevance") is None else f"{k['relevance']:.2f}"
-            add(f"| {cell(k['keyword'])} | {k.get('volume')} | {k.get('difficulty') if k.get('difficulty') is not None else 'n/a'} | {cell(k.get('intent'))} | {rel} | {k['target']} |")
+            add(f"| {cell(k['keyword'])} | {k.get('volume')} | {k.get('difficulty') if k.get('difficulty') is not None else 'n/a'} | {cell(k.get('intent'))} | {rel} | {cell(k['target'])} |")
         add("")
         if x["serps"]:
             add("| Keyword | Site position | AI Overview | Top 3 |\n|---|---:|---|---|")
             for sp in x["serps"]:
                 aio = ("yes, cites the site" if sp["ai_overview_cites_site"] else "yes, site not cited") if sp["ai_overview"] else "none"
-                add(f"| {cell(sp['keyword'])} | {sp['own_position'] or 'not in top 10'} | {aio} | {', '.join(t['domain'] for t in sp['top'][:3])} |")
+                add(f"| {cell(sp['keyword'])} | {sp['own_position'] or 'not in top 10'} | {aio} | {cell(', '.join(t['domain'] for t in sp['top'][:3]))} |")
             add("")
 
     add("## What the crawl found\n")
@@ -111,7 +141,7 @@ def write_md(vm: dict, path: Path) -> Path:
         for c in vm["site_cards"]:
             conf = f", confidence {c['confidence']:.2f}" if "confidence" in c else ""
             flag = "" if c["band"] in ("act", "yes", "no") else " _(verify)_"
-            add(f"- **{c['question']}** {c['answer']}{conf}{flag}")
+            add(f"- **{cell(c['question'])}** {cell(c['answer'])}{conf}{flag}")
         add("")
         jp = d["jev"]["pages"]
         add(pie("Page types (Jev)", dict(Counter(a["page_type"]["value"] for a in jp.values() if a).most_common())))
@@ -123,13 +153,13 @@ def write_md(vm: dict, path: Path) -> Path:
         if vm["invest_pages"]:
             add("| Important but weak | Importance | Quality | Jev suggests |\n|---|---:|---:|---|")
             for p in vm["invest_pages"]:
-                add(f"| {p['short']} | {p['importance']:.2f} | {p['quality']:.2f} | {cell((p['action'] or '').replace('_', ' '))} |")
+                add(f"| {cell(p['short'])} | {p['importance']:.2f} | {p['quality']:.2f} | {cell((p['action'] or '').replace('_', ' '))} |")
             add("")
         if vm["jev_pairs"]:
             add("**Pages that may compete for the same searches**\n")
             add("| Page A | Page B | Title overlap | P(compete) |\n|---|---|---:|---:|")
             for p in vm["jev_pairs"][:20]:
-                add(f"| {p['a']} | {p['b']} | {p['title_overlap']} | {p['judgment']['value']:.2f} |")
+                add(f"| {cell(p['a'])} | {cell(p['b'])} | {p['title_overlap']} | {p['judgment']['value']:.2f} |")
             add("")
 
     add("## Findings by area\n")
@@ -147,23 +177,23 @@ def write_md(vm: dict, path: Path) -> Path:
                 tags.append(f"{a['needs_review']} to verify")
             if a["heuristic"]:
                 tags.append("heuristic")
-            add(f"**{a['action_id']} · {a['title']}** `{'` `'.join(tags)}`\n")
-            add(f"- Evidence: {a['count']} affected · {a['evidence']}")
-            add(f"- Fix: {a['fix']} ([source]({a['source']}))")
-            add("- URLs: " + ", ".join(a["urls"][:8]) + (f" and {a['count'] - 8} more" if a["count"] > 8 else ""))
+            add(f"**{a['action_id']} · {cell(a['title'])}** `{'` `'.join(tags)}`\n")
+            add(f"- Evidence: {a['count']} affected · {cell(a['evidence'])}")
+            add(f"- Fix: {cell(a['fix'])} ([source]({report_link(a['source'])}))")
+            add("- URLs: " + ", ".join(cell(u) for u in a["urls"][:8]) + (f" and {a['count'] - 8} more" if a["count"] > 8 else ""))
             add("")
 
     add("## Robots access\n")
     add("| User agent | Access |\n|---|---|")
     for b, ok in {**vm["search_bots"], **vm["ai_bots"]}.items():
-        add(f"| {b} | {'allowed' if ok else 'blocked'} |")
+        add(f"| {cell(b)} | {'allowed' if ok else 'blocked'} |")
     add("")
 
     add("## Page inventory\n")
     add("| Page | Depth | Words | Inlinks | Type (Jev) | Intent (Jev) | Importance | Action (Jev) |\n|---|---:|---:|---:|---|---|---:|---|")
     for p in vm["pages"]:
         imp = f"{p['importance']:.2f}" if p["importance"] is not None else ""
-        add(f"| {p['url']} | {p['depth'] if p['depth'] != 99 else ''} | {p['words']} | {p['inlinks']} | {label(p['page_type'])} | {label(p['intent'])} | {imp} | {label(p['action'])} |")
+        add(f"| {cell(p['url'])} | {p['depth'] if p['depth'] != 99 else ''} | {p['words']} | {p['inlinks']} | {label(p['page_type'])} | {label(p['intent'])} | {imp} | {label(p['action'])} |")
     add("")
 
     add("## Method and limits\n")
@@ -179,6 +209,6 @@ def write_md(vm: dict, path: Path) -> Path:
     else:
         add("- No Search Console, analytics, backlink or keyword data was used (run with --full for DataForSEO).")
     add("- Scores rank work; they do not predict rankings or traffic.")
-    add(f"\n_Generated by jev-seo {d['tool']['version']}._\n")
+    add(f"\n_Generated by jev-seo {cell(d['tool']['version'])}._\n")
     path.write_text("\n".join(L))
     return path
