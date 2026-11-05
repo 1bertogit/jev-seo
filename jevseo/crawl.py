@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import gzip
 import ipaddress
+import io
+import os
 import random
 import re
 import socket
@@ -25,9 +27,17 @@ import requests
 from lxml import etree
 
 from jevseo import USER_AGENT
+from jevseo.env import hosted_mode
 from jevseo.parse import host_key, normalize_url, parse_page
 
 TIMEOUT = 20
+MAX_URL_LENGTH = 2048
+MAX_BODY_BYTES = 5 * 1024 * 1024
+MAX_TOTAL_BYTES = 64 * 1024 * 1024
+MAX_REQUESTS = 300
+MAX_SITEMAP_DECOMPRESSED_BYTES = 10 * 1024 * 1024
+STREAM_CHUNK_BYTES = 64 * 1024
+NAT64_PREFIXES = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("64:ff9b:1::/48"))
 SKIP_EXT = re.compile(r"\.(jpe?g|png|gif|webp|avif|svg|ico|pdf|zip|gz|mp4|mp3|webm|woff2?|ttf|css|js|xml|json|txt|md|markdown|docx?|xlsx?|pptx?)$", re.I)
 AI_BOTS = ["GPTBot", "OAI-SearchBot", "ChatGPT-User", "ClaudeBot", "Claude-SearchBot", "PerplexityBot", "Google-Extended", "Applebot-Extended", "CCBot", "Bytespider"]
 SEARCH_BOTS = ["Googlebot", "Bingbot"]
@@ -38,56 +48,240 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _global_address(value: str) -> bool:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    # Be explicit for runtimes where is_global on an IPv4-mapped IPv6 address
+    # does not inherit the mapped IPv4 address' classification.
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+        address = address.ipv4_mapped
+    if address.is_multicast or address.is_unspecified or address.is_reserved or address.is_loopback or address.is_link_local:
+        return False
+    if isinstance(address, ipaddress.IPv6Address):
+        # These standard transition prefixes encode an IPv4 destination. The
+        # prefix itself is not an Internet destination, so fail closed rather
+        # than trusting a globally classified IPv6 wrapper.
+        if any(address in prefix for prefix in NAT64_PREFIXES):
+            return False
+        embedded = []
+        if address.sixtofour:
+            embedded.append(address.sixtofour)
+        if address.teredo:
+            embedded.extend(address.teredo)
+        if embedded and not all(_global_address(str(ipv4)) for ipv4 in embedded):
+            return False
+    if address.is_private:
+        return False
+    return address.is_global
+
+
 def public_host(host: str) -> bool:
-    """SSRF guard: refuse hosts that resolve to private, loopback or link-local space."""
+    """Resolve every returned A/AAAA address and require all of them global."""
+    host = host.strip()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    if not host:
+        return False
     try:
         infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
+    except (OSError, socket.gaierror):
         return False
+    addresses = []
     for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+        if info[0] not in (socket.AF_INET, socket.AF_INET6):
+            continue
+        try:
+            addresses.append(info[4][0])
+        except (IndexError, TypeError):
             return False
-    return True
+    return bool(addresses) and all(_global_address(address) for address in addresses)
+
+
+def validate_public_url(url: str) -> str:
+    """Canonicalize an HTTP(S) URL whose complete DNS answer is public."""
+    if not isinstance(url, str) or len(url) > MAX_URL_LENGTH or any(ord(c) < 32 or ord(c) == 127 for c in url):
+        raise ValueError("invalid public URL")
+    try:
+        parsed = urlparse(url)
+        scheme = parsed.scheme.lower()
+        if scheme not in ("http", "https") or not parsed.netloc or "@" in parsed.netloc:
+            raise ValueError("invalid public URL")
+        if parsed.username is not None or parsed.password is not None or not parsed.hostname or parsed.netloc.endswith(":"):
+            raise ValueError("invalid public URL")
+        port = parsed.port
+        if port is not None and port not in (80, 443):
+            raise ValueError("invalid public URL")
+        host = parsed.hostname.encode("idna").decode("ascii").lower()
+        netloc = f"[{host}]" if ":" in host else host
+        if port is not None:
+            netloc += f":{port}"
+        canonical = normalize_url(parsed._replace(scheme=scheme, netloc=netloc).geturl())
+    except (UnicodeError, ValueError, TypeError):
+        raise ValueError("invalid public URL") from None
+    if len(canonical) > MAX_URL_LENGTH or not public_host(host):
+        raise ValueError("invalid public URL")
+    return canonical
+
+
+def validate_proxy_url(url: str) -> str:
+    """Validate trusted worker proxy configuration without resolving its host."""
+    if not isinstance(url, str) or not url or any(ord(c) < 32 or ord(c) == 127 for c in url):
+        raise ValueError("invalid hosted egress proxy")
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc or "@" in parsed.netloc:
+            raise ValueError
+        if parsed.username is not None or parsed.password is not None or not parsed.hostname or parsed.port is None or not 1 <= parsed.port <= 65535:
+            raise ValueError
+        if "?" in url or "#" in url or parsed.path not in ("", "/"):
+            raise ValueError
+        host = parsed.hostname.encode("idna").decode("ascii").lower()
+        netloc = f"[{host}]" if ":" in host else host
+        proxy = f"{parsed.scheme.lower()}://{netloc}:{parsed.port}"
+    except (UnicodeError, ValueError, TypeError):
+        raise ValueError("invalid hosted egress proxy") from None
+    return proxy
 
 
 class Fetcher:
     def __init__(self, delay: float = 0.0):
         self.session = requests.Session()
+        self.hosted = hosted_mode()
         self.session.headers.update({"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml,*/*;q=0.8", "Accept-Language": "en;q=0.9,*;q=0.5"})
+        self.proxy = None
+        if self.hosted:
+            try:
+                self.proxy = validate_proxy_url(os.environ["JEVSEO_EGRESS_PROXY"])
+            except (KeyError, ValueError):
+                raise ValueError("hosted mode requires a valid egress proxy") from None
+            self.session.trust_env = False
+            self.session.proxies = {"http": self.proxy, "https": self.proxy}
+            self.session.headers.update({"Accept-Encoding": "identity"})
         self.delay = delay
         self.lock = threading.Lock()
         self.last = 0.0
         self.requests = 0
-        self.public: dict[str, bool] = {}
+        self.bytes = 0
+        self._limit_reasons: list[str] = []
+        self._hit_request_cap = False
+        self._hit_body_cap = False
+        self._hit_total_bytes_cap = False
+        self._hit_sitemap_cap = False
 
-    def _pace(self) -> None:
+    def _note_limit(self, reason: str) -> None:
         with self.lock:
+            if reason not in self._limit_reasons:
+                self._limit_reasons.append(reason)
+            if reason == "request cap exceeded":
+                self._hit_request_cap = True
+            elif reason == "response body limit exceeded":
+                self._hit_body_cap = True
+            elif reason == "total response bytes limit exceeded":
+                self._hit_total_bytes_cap = True
+            elif reason == "sitemap decompression limit exceeded":
+                self._hit_sitemap_cap = True
+
+    def _pace(self) -> bool:
+        with self.lock:
+            if self.hosted and self.requests >= MAX_REQUESTS:
+                if "request cap exceeded" not in self._limit_reasons:
+                    self._limit_reasons.append("request cap exceeded")
+                self._hit_request_cap = True
+                return False
             self.requests += 1
             if self.delay:
                 wait = self.last + self.delay - time.monotonic()
                 if wait > 0:
                     time.sleep(wait)
                 self.last = time.monotonic()
+        return True
 
-    def _allowed_host(self, url: str) -> bool:
-        host = (urlparse(url).hostname or "").lower()
-        if host not in self.public:
-            self.public[host] = public_host(host)
-        return self.public[host]
+    def _consume_bytes(self, size: int) -> bool:
+        with self.lock:
+            if self.bytes + size > MAX_TOTAL_BYTES:
+                if "total response bytes limit exceeded" not in self._limit_reasons:
+                    self._limit_reasons.append("total response bytes limit exceeded")
+                self._hit_total_bytes_cap = True
+                return False
+            self.bytes += size
+            return True
+
+    def _read_hosted_response(self, response: requests.Response) -> requests.Response | None:
+        encoding = response.headers.get("content-encoding", "").strip().lower()
+        if encoding and encoding != "identity":
+            self._note_limit("non-identity content encoding rejected")
+            response.close()
+            return None
+        body = bytearray()
+        try:
+            for chunk in response.iter_content(chunk_size=STREAM_CHUNK_BYTES):
+                if not chunk:
+                    continue
+                chunk = bytes(chunk)
+                if len(body) + len(chunk) > MAX_BODY_BYTES:
+                    self._note_limit("response body limit exceeded")
+                    response.close()
+                    return None
+                if not self._consume_bytes(len(chunk)):
+                    response.close()
+                    return None
+                body.extend(chunk)
+        except (OSError, requests.RequestException, ValueError, TypeError):
+            response.close()
+            return None
+        response._content = bytes(body)
+        response._content_consumed = True
+        response.close()
+        return response
+
+    def limit_details(self) -> dict:
+        with self.lock:
+            reasons = list(self._limit_reasons)
+            return {
+                "max_requests": MAX_REQUESTS,
+                "max_body_bytes": MAX_BODY_BYTES,
+                "max_total_bytes": MAX_TOTAL_BYTES,
+                "requests_used": self.requests,
+                "bytes_used": self.bytes,
+                "hit_request_cap": self._hit_request_cap,
+                "hit_body_cap": self._hit_body_cap,
+                "hit_total_bytes_cap": self._hit_total_bytes_cap,
+                "hit_sitemap_decompression_cap": self._hit_sitemap_cap,
+                "reasons": reasons,
+            }
 
     def _send(self, method: str, url: str, **kw) -> requests.Response | None:
-        """Follow redirects by hand so every hop passes the private-network guard."""
+        """Follow redirects by hand so every hop is DNS-checked and bounded."""
         history = []
         for _ in range(10):
-            if urlparse(url).scheme not in ("http", "https") or not self._allowed_host(url):
-                return None
-            self._pace()
             try:
-                r = self.session.request(method, url, timeout=TIMEOUT, allow_redirects=False, **kw)
+                url = validate_public_url(url)
+            except ValueError:
+                return None
+            if not self._pace():
+                return None
+            request_kw = dict(kw)
+            if self.hosted:
+                headers = dict(request_kw.get("headers") or {})
+                for key in list(headers):
+                    if key.lower() == "accept-encoding":
+                        del headers[key]
+                headers["Accept-Encoding"] = "identity"
+                request_kw["headers"] = headers
+                request_kw["stream"] = True
+                request_kw["proxies"] = {"http": self.proxy, "https": self.proxy}
+            try:
+                r = self.session.request(method, url, timeout=TIMEOUT, allow_redirects=False, **request_kw)
             except (requests.RequestException, ValueError):
                 return None
-            if r.is_redirect and r.headers.get("location"):
+            if self.hosted:
+                r = self._read_hosted_response(r)
+                if r is None:
+                    return None
+            is_redirect = getattr(r, "is_redirect", 300 <= getattr(r, "status_code", 0) < 400)
+            if is_redirect and r.headers.get("location"):
                 history.append(r)
                 r.close()
                 url = urljoin(r.url, r.headers["location"])
@@ -149,8 +343,14 @@ def read_sitemaps(fetcher: Fetcher, urls: list[str], limit: int = 5000) -> dict:
         content = r.content
         if sm.endswith(".gz") or content[:2] == b"\x1f\x8b":
             try:
-                content = gzip.decompress(content)
-            except OSError:
+                with gzip.GzipFile(fileobj=io.BytesIO(content)) as stream:
+                    content = stream.read(MAX_SITEMAP_DECOMPRESSED_BYTES + 1)
+                if len(content) > MAX_SITEMAP_DECOMPRESSED_BYTES:
+                    entry["error"] = "sitemap decompression limit exceeded"
+                    fetcher._note_limit("sitemap decompression limit exceeded")
+                    out.append(entry)
+                    continue
+            except (OSError, EOFError):
                 pass
         try:
             root = etree.fromstring(content, parser=etree.XMLParser(recover=True, resolve_entities=False, no_network=True))
@@ -241,7 +441,10 @@ def _fetch_page(fetcher: Fetcher, url: str, site_host: str) -> dict:
         return rec
     facts = parse_page(rec["final_url"], decode(r), site_host)
     rec["raw_word_count"] = facts["word_count"]
-    return rec | facts
+    result = rec | facts
+    if getattr(fetcher, "hosted", False) and needs_render(result):
+        result["js_dependent"] = True
+    return result
 
 
 def decode(r: requests.Response) -> str:
@@ -276,16 +479,19 @@ def rerender(rec: dict, renderer: Renderer, site_host: str) -> dict:
 def crawl(start_url: str, max_pages: int = 60, max_depth: int = 5, workers: int = 6, render_mode: str = "auto", time_budget: int = 600, log=print) -> dict:
     if not re.match(r"^https?://", start_url):
         start_url = "https://" + start_url
-    start = normalize_url(start_url)
-    host = urlparse(start).netloc
-    if not public_host(host.split(":")[0]):
-        raise SystemExit(f"Refusing to crawl {host}: it does not resolve to a public address.")
-
     fetcher = Fetcher()
+    try:
+        start = validate_public_url(start_url)
+    except ValueError:
+        raise SystemExit(f"Refusing to crawl {start_url}: it is not a valid public HTTP(S) URL.") from None
+
     home = fetcher.get(start)
     if home is None:
         raise SystemExit(f"Could not reach {start}.")
-    final_home = normalize_url(home.url)
+    try:
+        final_home = validate_public_url(home.url)
+    except ValueError:
+        raise SystemExit(f"Refusing to crawl {start}: the final URL is not public.") from None
     origin = f"{urlparse(final_home).scheme}://{urlparse(final_home).netloc}"
     site = host_key(urlparse(final_home).netloc)
     log(f"homepage {start} -> {final_home} (HTTP {home.status_code})")
@@ -316,6 +522,8 @@ def crawl(start_url: str, max_pages: int = 60, max_depth: int = 5, workers: int 
     r = fetcher.get(origin + "/llms.txt")
     probes["llms_txt"] = bool(r is not None and r.status_code == 200 and "html" not in r.headers.get("content-type", "") and len(r.text.strip()) > 20)
 
+    if fetcher.hosted:
+        render_mode = "never"
     renderer = Renderer() if render_mode != "never" else None
     pages: dict[str, dict] = {}
     depth: dict[str, int] = {final_home: 0}
@@ -427,6 +635,7 @@ def crawl(start_url: str, max_pages: int = 60, max_depth: int = 5, workers: int 
         p["inlink_anchors"] = sorted(set(anchors.get(u, [])))[:15]
 
     home_rec = pages.get(final_home, {})
+    limit_details = fetcher.limit_details()
     return {
         "input_url": start_url,
         "start_url": start,
@@ -444,5 +653,5 @@ def crawl(start_url: str, max_pages: int = 60, max_depth: int = 5, workers: int 
         "blocked_by_robots": blocked,
         "render": {"mode": render_mode, "browser_available": renderer.available if renderer else None, "homepage_rendered": home_rec.get("rendered", False)},
         "requests": fetcher.requests,
-        "limits": {"max_pages": max_pages, "max_depth": max_depth, "time_budget_s": time_budget, "hit_page_cap": hit_cap, "hit_time_budget": hit_time},
+        "limits": {"max_pages": max_pages, "max_depth": max_depth, "time_budget_s": time_budget, "hit_page_cap": hit_cap, "hit_time_budget": hit_time, **limit_details},
     }

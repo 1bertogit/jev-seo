@@ -33,6 +33,10 @@ def host_key(host: str) -> str:
 NOISE = re.compile(r"\S{41,}")  # base64 blobs, hashes and minified code are not reader-facing words
 
 
+def _cap(value: str | None, limit: int) -> str | None:
+    return value[:limit] if value is not None else None
+
+
 def _text(el) -> str:
     if not el:
         return ""
@@ -95,13 +99,13 @@ def parse_page(url: str, html: str, site_host: str) -> dict:
     titles = [_text(t) for t in soup.find_all("title") if not t.find_parent("svg")]
     canon = soup.find("link", rel=lambda v: v and "canonical" in [r.lower() for r in (v if isinstance(v, list) else [v])])
     hreflang = [
-        {"lang": link.get("hreflang"), "href": urljoin(url, link.get("href", ""))}
+        {"lang": _cap(link.get("hreflang"), 2048), "href": _cap(urljoin(url, link.get("href", "")), 2048)}
         for link in soup.find_all("link", hreflang=True)
     ]
     schema_types, schema_errors, schema_nodes = _jsonld(soup)
     microdata = sorted({i.get("itemtype", "").rsplit("/", 1)[-1] for i in soup.find_all(itemtype=True)} - {""})
 
-    headings = {f"h{i}": [_text(h) for h in soup.find_all(f"h{i}")] for i in range(1, 4)}
+    headings = {f"h{i}": [_cap(_text(h), 512) for h in soup.find_all(f"h{i}")] for i in range(1, 4)}
     outline = [(h.name, _text(h)) for h in soup.find_all(re.compile("^h[1-6]$"))]
     heading_skips = 0
     last = 0
@@ -165,22 +169,22 @@ def parse_page(url: str, html: str, site_host: str) -> dict:
     html_tag = soup.find("html")
 
     return {
-        "title": titles[0] if titles else None,
+        "title": _cap(titles[0], 512) if titles else None,
         "title_count": len(titles),
-        "meta_description": meta(name="description"),
-        "meta_robots": (meta(name="robots") or "").lower() or None,
-        "canonical": normalize_url(urljoin(url, canon.get("href", ""))) if canon and canon.get("href") else None,
-        "lang": (html_tag.get("lang") if html_tag else None) or None,
-        "viewport": meta(name="viewport"),
+        "meta_description": _cap(meta(name="description"), 2048),
+        "meta_robots": _cap((meta(name="robots") or "").lower() or None, 2048),
+        "canonical": _cap(normalize_url(urljoin(url, canon.get("href", ""))), 2048) if canon and canon.get("href") else None,
+        "lang": _cap((html_tag.get("lang") if html_tag else None) or None, 2048),
+        "viewport": _cap(meta(name="viewport"), 2048),
         "charset": bool(soup.find("meta", charset=True)) or "charset" in (html[:2000].lower()),
-        "og": {k: meta(prop=f"og:{k}") for k in ("title", "description", "image", "type", "url")},
-        "twitter_card": meta(name="twitter:card"),
+        "og": {k: _cap(meta(prop=f"og:{k}"), 2048) for k in ("title", "description", "image", "type", "url")},
+        "twitter_card": _cap(meta(name="twitter:card"), 2048),
         "favicon": bool(soup.find("link", rel=lambda v: v and "icon" in " ".join(v if isinstance(v, list) else [v]).lower())),
         "hreflang": hreflang,
         "h1": headings["h1"],
         "h2": headings["h2"][:30],
         "h3": headings["h3"][:30],
-        "outline": [f"{n}: {t}" for n, t in outline[:60]],
+        "outline": [_cap(f"{n}: {t}", 512) for n, t in outline[:60]],
         "heading_skips": heading_skips,
         "word_count": len(words),
         "text_excerpt": main_text[:8000],

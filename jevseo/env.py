@@ -1,8 +1,8 @@
 """Secret lookup. Values are returned to callers, never printed or written.
 
-Order: the process environment, then the first env file that defines the name, among
-$JEVSEO_ENV_FILE, ./.env in the working directory, .env in this repository,
-and ~/Desktop/Keys/.env (the author's local layout).
+Normal mode checks the process environment, then the first env file that defines the
+name, among $JEVSEO_ENV_FILE, ./.env in the working directory, .env in this
+repository, and ~/Desktop/Keys/.env. Hosted mode checks only the process environment.
 """
 from __future__ import annotations
 
@@ -10,6 +10,11 @@ import os
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+
+
+def hosted_mode() -> bool:
+    """Whether the process was explicitly launched in the restricted worker mode."""
+    return os.environ.get("JEVSEO_HOSTED") == "1"
 
 
 def key_files() -> list[Path]:
@@ -23,6 +28,8 @@ def key_files() -> list[Path]:
 def secret(name: str) -> str | None:
     if os.environ.get(name):
         return os.environ[name]
+    if hosted_mode():
+        return None
     for path in key_files():
         if not path.is_file():
             continue
