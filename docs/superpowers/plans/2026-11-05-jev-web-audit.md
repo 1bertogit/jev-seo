@@ -167,6 +167,9 @@ nota e avisos serializáveis, nunca credenciais ou rastros de exceção público
 - [ ] Testar admissão concorrente em SQLite real temporário: 3/IP/24h, fila10,
   reserva50_000 microdólares e limite diário1_000_000. Falhas contam nos limites.
 - [ ] Testar mesma chave idempotente: não duplica fila/custo; URL diferente conflita.
+- [ ] Reter metadados idempotentes por48h desde aceitação e testar retry expirado
+  após uma admissão alheia: conflito sem nova reserva durante a retenção. Após48h,
+  reutilização é nova submissão; limpar filas expiradas sem retenção infinita.
 - [ ] Implementar transação `BEGIN IMMEDIATE`, fingerprint HMAC separado dos
   relatórios e tokens de tarefa deriváveis com segredo do serviço.
 - [ ] Testar exclusão de segundo executor por lease em banco e recuperação de

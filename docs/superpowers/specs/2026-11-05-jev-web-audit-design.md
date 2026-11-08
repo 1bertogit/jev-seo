@@ -115,6 +115,10 @@ publicar depende de confirmar capacidade de execução contínua e volume persis
   e impedir acessos externos ou a arquivos arbitrários pelo renderizador PDF.
 - Reservar US$ 0,05 por tarefa aceita, sem devolver a reserva no MVP: no máximo
   20 tarefas por dia. Retries da mesma criação precisam ser idempotentes.
+- Manter o registro de idempotência por 48 horas desde a criação, incluindo
+  24 horas após a expiração dos arquivos; nesse intervalo, um retry expirado
+  retorna conflito e não gera outra análise paga. Depois, a chave pode ser
+  reutilizada como nova submissão. Os relatórios continuam expirando em 24 horas.
 - Usar chave Jev dedicada com limite no provedor: o ledger local é estimativo
   e não representa garantia absoluta de cobrança externa.
 - Tentar cada formato independentemente. A nota e os arquivos devem refletir
