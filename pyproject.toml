@@ -11,6 +11,8 @@ dependencies = ["requests", "beautifulsoup4", "lxml", "matplotlib", "jinja2", "w
 
 [project.optional-dependencies]
 render = ["playwright"]
+web = ["fastapi", "uvicorn"]
+test = ["httpx"]
 
 [project.scripts]
 jevseo = "jevseo.cli:main"

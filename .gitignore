@@ -1,4 +1,7 @@
 __pycache__/
 *.pyc
+.venv/
+.venv-web/
+*.egg-info/
 jev-seo-reports/
 .env

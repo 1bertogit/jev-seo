@@ -77,6 +77,7 @@ Optional: `pip install playwright && playwright install chromium` renders pages 
 Reports land in `jev-seo-reports/<domain>-<stamp>/`. The offline tests need no keys and spend nothing:
 
 ```sh
+pip install -e '.[web,test]'                  # include the hosted API test dependencies
 python -m unittest discover -s tests -v
 ```
 
