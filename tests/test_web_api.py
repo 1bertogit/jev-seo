@@ -57,6 +57,7 @@ class ApiTests(unittest.TestCase):
 
     def test_status_requires_task_token_and_download_has_fixed_name(self):
         def fake_run(job, config, on_progress, stop_event=None):
+            time.sleep(0.3)  # Exercise completion beyond the worker's idle polling interval.
             folder = config.jobs_dir / job["job_id"]
             folder.mkdir(parents=True, exist_ok=True)
             (folder / "report.md").write_text("# report\n")
@@ -66,10 +67,13 @@ class ApiTests(unittest.TestCase):
             with TestClient(create_app(self.config)) as client:
                 response = client.post("/v1/jobs", headers=self.headers, json={"url": "https://example.com/"})
                 job_id = response.json()["jobId"]
-                for _ in range(20):
-                    if "md" in client.get("/v1/jobs/" + job_id, headers={"Authorization": "Bearer " + self.config.service_token, "X-Job-Token": task_token(self.config.task_secret, job_id)}).json().get("files", []):
+                deadline = time.monotonic() + 3
+                while True:
+                    ready = client.get("/v1/jobs/" + job_id, headers={"Authorization": "Bearer " + self.config.service_token, "X-Job-Token": task_token(self.config.task_secret, job_id)}).json()
+                    if "md" in ready.get("files", []) or time.monotonic() >= deadline:
                         break
                     time.sleep(0.01)
+                self.assertIn("md", ready.get("files", []), ready)
                 auth = {"Authorization": "Bearer " + self.config.service_token}
                 self.assertEqual(client.get("/v1/jobs/" + job_id, headers=auth).status_code, 401)
                 token = task_token(self.config.task_secret, job_id)
@@ -82,8 +86,6 @@ class ApiTests(unittest.TestCase):
                 self.assertIn(malformed.status_code, (401, 404))
 
                 folder = Path(self.tmp.name) / "jobs" / job_id
-                folder.mkdir(parents=True, exist_ok=True)
-                (folder / "report.md").write_text("# report\n")
                 download = client.get(f"/v1/jobs/{job_id}/files/md", headers={**auth, "X-Job-Token": token})
                 self.assertEqual(download.status_code, 200)
                 self.assertIn('filename="report.md"', download.headers["content-disposition"])
