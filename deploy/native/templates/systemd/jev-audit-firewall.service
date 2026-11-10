@@ -1,0 +1,27 @@
+[Unit]
+Description=Jev audit native firewall rules
+After=local-fs.target
+Before=jev-audit-api.service jev-audit-egress.service jev-audit-relay.socket jev-audit-relay.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/
+ExecStartPre=/usr/sbin/nft --check --file /etc/jev-audit-native/egress.nft
+ExecStart=/usr/sbin/nft --file /etc/jev-audit-native/egress.nft
+RemainAfterExit=yes
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+TasksMax=32
+MemoryMax=64M
+CPUQuota=20%
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

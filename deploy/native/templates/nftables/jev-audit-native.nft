@@ -1,0 +1,82 @@
+create table inet jev_audit_native
+table inet jev_audit_native {
+    chain input {
+        type filter hook input priority 0; policy accept;
+        ip daddr 10.0.1.1 tcp dport 18081 ip saddr 10.0.1.7 accept
+        ip daddr 10.0.1.1 tcp dport 18081 drop
+        ct state established,related accept
+    }
+
+    chain output {
+        type filter hook output priority 0; policy accept;
+        meta skuid @API_UID@ jump api_output
+        meta skuid @EGRESS_UID@ jump egress_output
+        meta skuid @RELAY_UID@ jump relay_output
+    }
+
+    chain api_output {
+        ct state established,related ct direction reply accept
+        oifname "lo" ip daddr 127.0.0.1 tcp dport 4750 accept
+        oifname "lo" ip daddr 127.0.0.53 udp dport 53 accept
+        oifname "lo" ip daddr 127.0.0.53 tcp dport 53 accept
+        meta nfproto ipv4 counter drop comment "jev-api-deny-ipv4"
+        meta nfproto ipv6 counter drop comment "jev-api-deny-ipv6"
+        drop
+    }
+
+    chain egress_output {
+        ct state established,related ct direction reply accept
+        oifname "lo" ip daddr 127.0.0.53 udp dport 53 accept
+        oifname "lo" ip daddr 127.0.0.53 tcp dport 53 accept
+
+        ip daddr {
+            0.0.0.0/8,
+            10.0.0.0/8,
+            10.0.1.1/32,
+            10.0.1.7/32,
+            100.64.0.0/10,
+            127.0.0.0/8,
+            169.254.0.0/16,
+            172.16.0.0/12,
+            192.0.0.0/24,
+            192.0.2.0/24,
+            192.88.99.0/24,
+            192.168.0.0/16,
+            198.18.0.0/15,
+            198.51.100.0/24,
+            203.0.113.0/24,
+            224.0.0.0/4,
+            240.0.0.0/4,
+            45.132.246.207/32
+        } drop
+
+        ip6 daddr {
+            ::/128,
+            ::1/128,
+            ::ffff:0:0/96,
+            64:ff9b::/96,
+            64:ff9b:1::/48,
+            100::/64,
+            2001::/23,
+            2001:db8::/32,
+            2002::/16,
+            3fff::/20,
+            5f00::/16,
+            fc00::/7,
+            fe80::/10,
+            fec0::/10,
+            ff00::/8,
+            @HOST_IPV6_DENIES@
+        } drop
+
+        ip daddr 0.0.0.0/0 tcp dport { 80, 443 } accept
+        ip6 daddr 2000::/3 tcp dport { 80, 443 } accept
+        drop
+    }
+
+    chain relay_output {
+        ct state established,related ct direction reply accept
+        oifname "lo" ip daddr 127.0.0.1 tcp dport 18080 accept
+        drop
+    }
+}

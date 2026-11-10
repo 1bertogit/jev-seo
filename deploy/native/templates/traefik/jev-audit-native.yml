@@ -1,0 +1,14 @@
+http:
+  routers:
+    jev-audit-native:
+      rule: Host(`jev-audit.humberto.ai`)
+      entryPoints:
+        - @TRAEFIK_ENTRYPOINT@
+      service: jev-audit-native
+      tls:
+        certResolver: @TRAEFIK_RESOLVER@
+  services:
+    jev-audit-native:
+      loadBalancer:
+        servers:
+          - url: http://10.0.1.1:18081

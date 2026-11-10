@@ -1,0 +1,30 @@
+[Unit]
+Description=Jev audit native egress proxy
+After=network-online.target
+After=jev-audit-firewall.service
+Wants=network-online.target
+BindsTo=jev-audit-firewall.service
+
+[Service]
+Type=simple
+User=jev-audit-egress
+Group=jev-audit-egress
+WorkingDirectory=@RELEASE_ROOT@
+ExecStart=@RELEASE_ROOT@/bin/smokescreen --config-file @RELEASE_ROOT@/smokescreen.json --listen-ip 127.0.0.1 --listen-port 4750
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+MemoryMax=128M
+CPUQuota=20%
+TasksMax=64
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,34 @@
+[Unit]
+Description=Jev audit native API
+After=network-online.target
+After=jev-audit-firewall.service
+Wants=network-online.target
+BindsTo=jev-audit-firewall.service
+
+[Service]
+Type=simple
+User=jev-audit-api
+Group=jev-audit-api
+WorkingDirectory=@RELEASE_ROOT@
+EnvironmentFile=/etc/jev-audit-native/api.env
+ExecStart=@RELEASE_ROOT@/venv/bin/python -m jevseo.web --host 127.0.0.1 --port 18080
+RuntimeDirectory=jev-audit-native
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/jev-audit-native /run/jev-audit-native
+MemoryMax=1G
+CPUQuota=100%
+TasksMax=128
+RestrictNamespaces=user pid ipc uts mnt
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+AppArmorProfile=jev-audit-native
+
+[Install]
+WantedBy=multi-user.target

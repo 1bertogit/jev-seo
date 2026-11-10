@@ -1,0 +1,29 @@
+[Unit]
+Description=Jev audit private API relay
+Requires=jev-audit-relay.socket
+After=jev-audit-relay.socket
+After=jev-audit-firewall.service
+BindsTo=jev-audit-firewall.service
+
+[Service]
+Type=simple
+User=jev-audit-relay
+Group=jev-audit-relay
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:18080
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+MemoryMax=64M
+CPUQuota=20%
+TasksMax=64
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
