@@ -244,7 +244,7 @@ class NativeStageTests(unittest.TestCase):
             self.assertNotIn("SECRET", json.dumps(result))
 
     def test_apply_requires_explicit_root_gate_before_mutation(self):
-        with mock.patch.object(STAGE, "verify_bundle", return_value=(SOURCE_SHA, {})), mock.patch.object(STAGE, "host_versions", return_value={}), mock.patch.object(STAGE, "validate_prerequisites"), mock.patch.object(STAGE, "validate_resolver"), mock.patch.object(STAGE.shutil, "disk_usage", return_value=SimpleNamespace(free=STAGE.MIN_FREE_BYTES)), mock.patch.object(STAGE, "validate_accounts"), mock.patch.object(STAGE, "validate_paths"), mock.patch.object(STAGE, "occupied_uids", return_value=set()), mock.patch.object(STAGE.os, "geteuid", return_value=1000):
+        with mock.patch.object(STAGE, "verify_bundle", return_value=(SOURCE_SHA, {})), mock.patch.object(STAGE, "host_versions", return_value={}), mock.patch.object(STAGE, "validate_prerequisites"), mock.patch.object(STAGE, "validate_resolver"), mock.patch.object(STAGE, "disk_anchor", return_value=Path("/opt")), mock.patch.object(STAGE.shutil, "disk_usage", return_value=SimpleNamespace(free=STAGE.MIN_FREE_BYTES)), mock.patch.object(STAGE, "validate_accounts"), mock.patch.object(STAGE, "validate_paths"), mock.patch.object(STAGE, "occupied_uids", return_value=set()), mock.patch.object(STAGE.os, "geteuid", return_value=1000):
             with self.assertRaises(STAGE.StageError) as error:
                 STAGE.stage_bundle(Path("bundle.tar.gz"), apply=True)
         self.assertEqual(str(error.exception), "apply_requires_root")
@@ -386,8 +386,16 @@ class NativeStageTests(unittest.TestCase):
                     STAGE._chmod_tree(root)
 
     def test_disk_check_uses_existing_allowlisted_ancestor_when_release_root_absent(self):
-        with mock.patch.object(STAGE, "DISK_ANCHORS", (Path("/opt"),)):
+        safe = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+        with mock.patch.object(STAGE, "DISK_ANCHORS", (Path("/opt"),)), mock.patch.object(Path, "lstat", return_value=safe):
             self.assertEqual(STAGE.disk_anchor(Path("/opt/jev-audit-native/releases") / SOURCE_SHA), Path("/opt"))
+        for unsafe in (
+            SimpleNamespace(st_mode=stat.S_IFDIR | 0o775, st_uid=0),
+            SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=1000),
+        ):
+            with mock.patch.object(STAGE, "DISK_ANCHORS", (Path("/opt"),)), mock.patch.object(Path, "lstat", return_value=unsafe):
+                with self.assertRaisesRegex(STAGE.StageError, "disk_anchor_unsafe"):
+                    STAGE.disk_anchor(Path("/opt/jev-audit-native/releases") / SOURCE_SHA)
 
 
 if __name__ == "__main__":
