@@ -11,12 +11,14 @@ import hashlib
 import errno
 import json
 import os
+import pwd
 import re
 import secrets
 import stat
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from jevseo.parse import parse_page
@@ -36,6 +38,12 @@ DATA_ROOT = Path("/data")
 DEADLINE_SECONDS = 180.0
 EXPECTED_UID = 10001
 EXPECTED_GID = 10001
+EXPECTED_APPARMOR = "jev-audit-bwrap (enforce)"
+NATIVE_DATA_ROOT = Path("/var/lib/jev-audit-native-acceptance")
+NATIVE_ACCOUNT = "jev-audit-api"
+NATIVE_APPARMOR = "jev-audit-native (enforce)"
+NATIVE_PROXY = "http://127.0.0.1:4750"
+NATIVE_RUNTIME_RE = re.compile(r"^/opt/jev-audit-native/releases/[0-9a-f]{40}/venv$")
 JOB_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 NAMESPACE_NAMES = ("mnt", "user", "pid", "ipc", "uts", "net", "cgroup")
 REQUIRED_ASSERTIONS = (
@@ -46,6 +54,65 @@ REQUIRED_ASSERTIONS = (
     "hidden_env",
     "provider_fake",
 )
+
+
+@dataclass(frozen=True)
+class AcceptanceContext:
+    """Trusted, fixed worker expectations for one acceptance invocation."""
+
+    data_root: Path
+    uid: int
+    gid: int
+    profile: str
+    fake_proxy: str
+    runtime_dir: Path
+
+
+def _docker_context() -> AcceptanceContext:
+    return AcceptanceContext(
+        data_root=DATA_ROOT,
+        uid=EXPECTED_UID,
+        gid=EXPECTED_GID,
+        profile=EXPECTED_APPARMOR,
+        fake_proxy="http://10.0.9.4:4750",
+        runtime_dir=Path("/usr/local"),
+    )
+
+
+def _native_context() -> AcceptanceContext:
+    uid = os.getuid()
+    if uid == 0 or os.geteuid() != uid:
+        raise RuntimeError("native acceptance must run as the dedicated account")
+    try:
+        account = pwd.getpwuid(uid)
+    except (KeyError, OSError) as exc:
+        raise RuntimeError("native acceptance account lookup failed") from exc
+    if (
+        account.pw_name != NATIVE_ACCOUNT
+        or os.getgid() != account.pw_gid
+        or os.getegid() != account.pw_gid
+        or account.pw_gid == 0
+    ):
+        raise RuntimeError("native acceptance identity mismatch")
+    runtime_dir = Path(sys.prefix)
+    if NATIVE_RUNTIME_RE.fullmatch(runtime_dir.as_posix()) is None:
+        raise RuntimeError("native acceptance venv path is not fixed")
+    return AcceptanceContext(
+        data_root=NATIVE_DATA_ROOT,
+        uid=uid,
+        gid=account.pw_gid,
+        profile=NATIVE_APPARMOR,
+        fake_proxy=NATIVE_PROXY,
+        runtime_dir=runtime_dir,
+    )
+
+
+def _parse_mode() -> bool:
+    """Accept only the operator-selected native switch, before any host work."""
+    args = sys.argv[1:]
+    if args not in ([], ["--native"]):
+        raise RuntimeError("only --native is accepted")
+    return args == ["--native"]
 
 
 def _owned_directory(path: Path, *, empty: bool = False) -> None:
@@ -130,9 +197,14 @@ def _worker_result_ok(
     uid: int = EXPECTED_UID,
     gid: int = EXPECTED_GID,
     *,
+    context: AcceptanceContext | None = None,
     stopped: bool = False,
     return_code: int | None = 0,
 ) -> bool:
+    if context is not None:
+        uid = context.uid
+        gid = context.gid
+    expected_profile = EXPECTED_APPARMOR if context is None else context.profile
     if stopped or return_code != 0 or not isinstance(result, dict) or result.get("ok") is not True:
         return False
     if result.get("uid") != uid or result.get("euid") != uid:
@@ -144,7 +216,7 @@ def _worker_result_ok(
     if result.get("gid") != gid or result.get("egid") != gid:
         return False
     apparmor = result.get("apparmor")
-    if apparmor != "jev-audit-bwrap (enforce)":
+    if apparmor != expected_profile:
         return False
     assertions = result.get("assertions")
     return isinstance(assertions, dict) and all(assertions.get(name) is True for name in REQUIRED_ASSERTIONS)
@@ -288,20 +360,32 @@ def build_synthetic_audit() -> dict:
     }
 
 
-def _probe_source(job_id: str, outer_secret: Path, database: Path, other_sentinel: Path) -> str:
+def _probe_source(
+    job_id: str,
+    outer_secret: Path,
+    database: Path,
+    other_sentinel: Path,
+    context: AcceptanceContext | None = None,
+) -> str:
+    context = _docker_context() if context is None else context
     output = f"/job/probe-result.json"
     owner = "/job/.acceptance-owner"
     worker_marker = f"/job/.worker-write-{job_id}"
-    runtime_canary = f"/usr/local/.jev-acceptance-ro-{job_id}"
     app_canary = f"/runtime/jevseo/.jev-acceptance-ro-{job_id}"
     return f'''import errno, json, os, stat
+import sys
 from pathlib import Path
 
 OUTPUT = {output!r}
 OWNER = {owner!r}
 WORKER_MARKER = {worker_marker!r}
-RUNTIME_CANARY = {runtime_canary!r}
 APP_CANARY = {app_canary!r}
+EXPECTED_RUNTIME_DIR = {str(context.runtime_dir)!r}
+EXPECTED_UID = {context.uid!r}
+EXPECTED_GID = {context.gid!r}
+EXPECTED_APPARMOR = {context.profile!r}
+EXPECTED_PROXY = {context.fake_proxy!r}
+NATIVE_RUNTIME = {context.profile == NATIVE_APPARMOR!r}
 OUTER_SECRET = {str(outer_secret)!r}
 DATABASE = {str(database)!r}
 OTHER_SENTINEL = {str(other_sentinel)!r}
@@ -358,18 +442,20 @@ def write_result(result):
 def main():
     values = status_values()
     apparmor = Path("/proc/self/attr/current").read_text(encoding="utf-8").strip()
+    runtime_base = Path(sys.prefix) if NATIVE_RUNTIME else Path(EXPECTED_RUNTIME_DIR)
+    runtime_canary = str(runtime_base / (".jev-acceptance-ro-" + JOB_ID))
     owner_ok = (not Path(OWNER).is_symlink() and Path(OWNER).read_text(encoding="ascii") == JOB_ID)
     exclusive_marker(WORKER_MARKER)
     assertions = {{
         "job_writable": owner_ok and Path(WORKER_MARKER).is_file(),
-        "runtime_ro": Path("/usr/local").is_dir() and write_fails(RUNTIME_CANARY),
+        "runtime_ro": (sys.prefix == EXPECTED_RUNTIME_DIR if NATIVE_RUNTIME else True) and runtime_base.is_dir() and write_fails(runtime_canary),
         "app_ro": Path("/runtime/jevseo/web/runner.py").is_file() and write_fails(APP_CANARY),
         "hidden_data": all(unreadable(path) for path in (OUTER_SECRET, DATABASE, OTHER_SENTINEL)),
         "hidden_env": all(os.environ.get(name) is None for name in ("JEV_AUDIT_SERVICE_TOKEN", "JEV_AUDIT_TASK_SECRET", "JEV_ACCEPTANCE_OUTER_SECRET")),
-        "provider_fake": os.environ.get("TYPESAFE_API_KEY") == "fake-provider-key" and os.environ.get("JEVSEO_EGRESS_PROXY") == "http://10.0.9.4:4750",
+        "provider_fake": os.environ.get("TYPESAFE_API_KEY") == "fake-provider-key" and os.environ.get("JEVSEO_EGRESS_PROXY") == EXPECTED_PROXY,
     }}
     result = {{
-        "ok": all(assertions.values()) and os.getuid() == {EXPECTED_UID} and os.geteuid() == {EXPECTED_UID} and os.getgid() == {EXPECTED_GID} and os.getegid() == {EXPECTED_GID} and int(values.get("NoNewPrivs", "0")) == 1 and int(values.get("CapEff", "-1"), 16) == 0 and int(values.get("CapBnd", "-1"), 16) == 0 and apparmor == "jev-audit-bwrap (enforce)",
+        "ok": all(assertions.values()) and os.getuid() == EXPECTED_UID and os.geteuid() == EXPECTED_UID and os.getgid() == EXPECTED_GID and os.getegid() == EXPECTED_GID and int(values.get("NoNewPrivs", "0")) == 1 and int(values.get("CapEff", "-1"), 16) == 0 and int(values.get("CapBnd", "-1"), 16) == 0 and apparmor == EXPECTED_APPARMOR,
         "uid": os.getuid(), "gid": os.getgid(), "euid": os.geteuid(), "egid": os.getegid(),
         "caps_eff": values.get("CapEff", ""), "caps_bnd": values.get("CapBnd", ""),
         "no_new_privs": int(values.get("NoNewPrivs", "0")), "apparmor": apparmor,
@@ -401,32 +487,35 @@ def _read_json(path: Path, limit: int = 64 * 1024) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
-def _run() -> dict:
-    if len(sys.argv) != 1:
-        raise RuntimeError("arguments are not accepted")
+def _run(context: AcceptanceContext | None = None) -> dict:
+    if context is None:
+        context = _native_context() if _parse_mode() else _docker_context()
     if not sandbox_available():
         raise RuntimeError("sandbox unavailable")
     job_id = secrets.token_hex(16)
-    job = _prepare_job_dir(DATA_ROOT, job_id)
+    job = _prepare_job_dir(context.data_root, job_id)
     other_id = hashlib.sha256((job_id + "-other").encode("ascii")).hexdigest()[:32]
-    other_job = DATA_ROOT / "jobs" / other_id
+    other_job = context.data_root / "jobs" / other_id
     other_job.mkdir(mode=0o700)
     _owned_directory(other_job, empty=True)
-    outer_secret = DATA_ROOT / ".acceptance-outer-secret"
-    database = DATA_ROOT / "jobs.sqlite3"
+    outer_secret = context.data_root / ".acceptance-outer-secret"
+    database = context.data_root / "jobs.sqlite3"
     other_sentinel = other_job / "sentinel"
     _write_exclusive_text(outer_secret, "outer-secret-canary")
     _write_exclusive_text(database, "database-canary")
     _write_exclusive_text(other_sentinel, "other-job-canary")
-    _write_exclusive(job / "probe.py", _probe_source(job_id, outer_secret, database, other_sentinel).encode("utf-8"))
+    _write_exclusive(
+        job / "probe.py",
+        _probe_source(job_id, outer_secret, database, other_sentinel, context=context).encode("utf-8"),
+    )
     outer_ns = _namespace_ids()
     config = WebConfig(
-        data_dir=DATA_ROOT,
+        data_dir=context.data_root,
         service_token="service-secret-canary-" + job_id,
         task_secret="task-secret-canary-" + job_id,
         typesafe_api_key="fake-provider-key",
         pagespeed_api_key=None,
-        egress_proxy="http://10.0.9.4:4750",
+        egress_proxy=context.fake_proxy,
     )
     sentinel_env = {"JEV_ACCEPTANCE_OUTER_SECRET": "outer-env-secret-canary", "JEV_AUDIT_SERVICE_TOKEN": config.service_token, "JEV_AUDIT_TASK_SECRET": config.task_secret}
     previous_env = {name: os.environ.get(name) for name in sentinel_env}
@@ -441,7 +530,7 @@ def _run() -> dict:
             else:
                 os.environ[name] = value
     result = _read_json(job / "probe-result.json")
-    if result is None or not _worker_result_ok(result, EXPECTED_UID, EXPECTED_GID, stopped=stopped, return_code=code):
+    if result is None or not _worker_result_ok(result, context=context, stopped=stopped, return_code=code):
         raise RuntimeError("worker probe failed")
     worker_ns = result.get("namespace_ids")
     if not isinstance(worker_ns, dict) or not _namespace_match(worker_ns, outer_ns):
